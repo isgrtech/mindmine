@@ -9,12 +9,13 @@
 
 | ファイル | 役割 |
 |---|---|
-| `index.html` | HTML 構造・UI 要素の定義 |
-| `style.css` | 全 UI スタイル |
+| `index.html` | ゲーム紹介ページ |
+| `game.html` | ゲーム画面の HTML |
+| `index.css` | 紹介ページのスタイル |
+| `style.css` | ゲーム画面のスタイル |
 | `game.js` | ゲームロジック全体（約 1,400 行） |
 
-`game.js` の冒頭に定数ブロックがあり、ゲームの全パラメータはここに集約されています。
-PixiJS v7（WebGL）でグラフィックを描画し、Web Audio API でサウンドを合成しています（外部アセット不要）。
+`game.js` がゲーム進行を担当し、PixiJS v7 で描画します。爆発演出と音には `assets/explosion.png` と `assets/Explosion04-1(Short).mp3` を使用します。
 
 ---
 
@@ -24,6 +25,7 @@ PixiJS v7（WebGL）でグラフィックを描画し、Web Audio API でサウ�
 |---|---|
 | **任意のキーを長押し → 離す** | そのキーに対応した地雷をカーソル位置に設置 |
 | **設置済みキーを再度押す** | 地雷を起爆（設置から 3 秒後以降のみ） |
+| **フィールド設定** | アスペクト比を選択（次回ゲーム開始時に適用） |
 
 追跡するキーは `game.js` の `TRACK_KEYS` で定義されています。
 
@@ -40,14 +42,14 @@ const TRACK_KEYS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-^\\@[;:],./'.split('');
 キーを押している時間（チャージ時間）が爆破半径を決定します。
 
 ```
-爆破半径 = BLAST_MIN + (チャージ時間 / CHARGE_FULL_MS) × (blastMax - BLAST_MIN)
+爆破半径 = blastMin + (チャージ時間 / CHARGE_FULL_MS) × (blastMax - blastMin)
 ```
 
 | 定数 | 値 | 意味 |
 |---|---|---|
 | `CHARGE_FULL_MS` | 2000 ms | この時間押し続けると最大チャージ |
-| `BLAST_MIN` | 40 px | 即離ししたときの最小爆破半径 |
-| `blastMax` | `min(gameW, gameH) / 4` | 最大爆破半径（ゲーム開始時のウィンドウサイズから算出） |
+| `blastMin` | `√(フィールド面積 / (最小面積の分母 × π))` | カスタム設定の初期値はフィールド面積の 1/36 |
+| `blastMax` | `√(フィールド面積 / (最大面積の分母 × π))` | カスタム設定の初期値はフィールド面積の 1/12 |
 
 チャージ中はカーソル周囲に点線円でプレビューが表示されます（`drawChargePreview` 関数）。
 
@@ -64,7 +66,7 @@ const TRACK_KEYS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-^\\@[;:],./'.split('');
 ```js
 const isDud   = held > CHARGE_FULL_MS;
 const clamped = Math.min(held, CHARGE_FULL_MS);  // 超過分は切り捨て
-const br      = BLAST_MIN + (clamped / CHARGE_FULL_MS) * (blastMax - BLAST_MIN);
+const br      = blastMin + (clamped / CHARGE_FULL_MS) * (blastMax - blastMin);
 ```
 
 ### 起爆待機時間
@@ -76,11 +78,11 @@ const br      = BLAST_MIN + (clamped / CHARGE_FULL_MS) * (blastMax - BLAST_MIN);
 const MINE_READY_MS = 3000;  // 設置→起爆可能になるまでの待機時間 (ms)
 ```
 
-### 画面サイズと活動範囲
+### フィールドの比率と表示サイズ
 
-`gameW` / `gameH` および `blastMax` はゲーム**開始時**のウィンドウサイズで固定され、
-プレイ中のリサイズは無視されます（`initState()` で設定）。
-敵の活動範囲もこのサイズを基準にしています。
+ゲーム画面の「フィールド設定」から 21:9、16:9、16:10、4:3、1:1 を選べます。開始前とゲームオーバー後に変更でき、選択するとフィールドに即時反映されます。ゲーム開始後は次のゲームオーバーまで変更できません。
+比率は保存され、ゲーム開始時にブラウザの表示領域へ収まる最大サイズで中央配置されます。
+プレイ中はフィールドサイズを固定し、余白は黒帯になります。敵の活動範囲もフィールド内です。
 
 ---
 
@@ -148,7 +150,7 @@ const baseEvo = EVO_MS_MAX - rNorm * (EVO_MS_MAX - EVO_MS_MIN);  // 30000〜2000
 ```
 
 ```
-爆破範囲補正 = 1 + (blastMax - 爆破半径) / (blastMax - BLAST_MIN)
+爆破範囲補正 = 1 + (blastMax - 爆破半径) / (blastMax - blastMin)
 　　　　　　  ※ 爆破範囲が最小のとき最大 2 倍、最大のとき 1 倍
 最終スコア = round(基礎点 × 爆破範囲補正) × ランク倍率
 ```
@@ -174,7 +176,6 @@ const baseEvo = EVO_MS_MAX - rNorm * (EVO_MS_MAX - EVO_MS_MIN);  // 30000〜2000
 ```js
 const RANK_INTERVAL_MS    = 30000; // 評価間隔
 const RANK_REFERENCE_MS   = 20000; // 基準出現数の参照時間
-const RANK_UP_THRESHOLD   = 0.6;   // 基準数の 60% 以上倒す → ランクアップ
 const RANK_DOWN_THRESHOLD = 0.4;   // 基準数の 40% 以下しか倒せない → ランクダウン
 ```
 
@@ -186,7 +187,7 @@ const killRate      = rankKillCount / expectedIn20s;
 
 | 撃破率 | 結果 |
 |---|---|
-| 60% 以上 | ランク +1 |
+| カスタム設定の撃破率以上（初期値 60%） | ランク +1 |
 | 40% 以下 | ランク -1（最低はランク 1） |
 | その間 | 変化なし |
 
@@ -194,20 +195,23 @@ const killRate      = rankKillCount / expectedIn20s;
 
 ### ランクの影響
 
+ゲーム開始前の「カスタム難易度」から、ランク上昇に必要な撃破率、ランクごとの敵移動速度上昇率、敵の出現間隔下限（最短）、ランクごとの出現間隔減少率、最小・最大爆破面積を変更できます。各設定は変更時にブラウザの `localStorage` へ保存され、次回起動時にも復元されます。「デフォルト設定に戻す」で初期値に戻せます。ランク下降条件（撃破率 40% 以下）は固定です。
+
 ランクが上がるほど難しく、かつ高得点になります：
 
 | 要素 | 変化 |
 |---|---|
 | スコア倍率 | ランク番号 × 1 倍（ランク 3 なら ×3） |
-| 敵出現間隔 | ランク 1 段階ごとに 10% 短縮（最短 500 ms） |
+| 敵出現間隔 | カスタム設定の減少率で短縮（初期値 10%/ランク、最短 500 ms） |
+| 敵の移動速度 | カスタム設定の率で上昇（初期値 1%/ランク） |
 | 敵の進化速度 | ランク 5 段階までは 10%/段階 短縮、以降は固定（最短 10 秒） |
 
 出現間隔の計算（`game.js` メインループ）：
 
 ```js
 const baseInterval  = Math.max(800, BASE_SPAWN_MS - (wave - 1) * 200);
-const rankSpeedMult = 1 + rankIndex * 0.1;
-const spawnInterval = Math.max(500, baseInterval / rankSpeedMult);
+const rankSpeedMult = 1 + rankIndex * difficulty.spawnIntervalDecreasePerRank;
+const spawnInterval = Math.max(difficulty.spawnIntervalMin, baseInterval / rankSpeedMult);
 ```
 
 ### リアルタイム表示
@@ -230,7 +234,7 @@ const spawnInterval = Math.max(500, baseInterval / rankSpeedMult);
 | ランク | 最終プレイヤーランク | 同上 |
 | 撃破速度 | 匹/分 | 同上 |
 
-自己ベストは `localStorage`（キー: `mm_best_score` / `mm_best_combo` / `mm_best_rank` / `mm_best_kpm`）に保存されます。
+自己ベスト（スコア・最大コンボ・ランク・撃破速度）はアスペクト比ごとに `localStorage` へ保存されます。異なる比率の記録は混在しません。
 各値は今回が上回った場合のみ更新されます（`endGame` 関数）。
 
 ---

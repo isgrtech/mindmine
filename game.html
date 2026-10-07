@@ -50,6 +50,61 @@
     ジャストミートで×2 / コンボボーナス
   </div>
 
+  <!-- 開始前に設定ダイアログを開くボタン -->
+  <div id="settings-launchers">
+    <button id="field-settings-open" class="settings-launcher" type="button">フィールド設定</button>
+    <button id="difficulty-settings-open" class="settings-launcher" type="button">カスタム難易度</button>
+  </div>
+
+  <!-- フィールド設定ダイアログ。変更は即時反映され、閉じる操作で決定 -->
+  <dialog id="field-settings" class="settings-dialog">
+    <div class="settings-dialog-content field-settings-content">
+      <div class="settings-dialog-heading">
+        <h2>フィールド設定</h2>
+        <button class="settings-close" type="button" aria-label="閉じる">×</button>
+      </div>
+      <label for="field-aspect">アスペクト比</label>
+      <select id="field-aspect">
+        <option value="2.333333">21:9</option>
+        <option value="1.777778" selected>16:9</option>
+        <option value="1.6">16:10</option>
+        <option value="1.333333">4:3</option>
+        <option value="1">1:1</option>
+      </select>
+      <p>ゲーム開始前のみ変更できます。爆破範囲はフィールド設定でも調整できます。</p>
+    </div>
+  </dialog>
+
+  <!-- 難易度はゲーム開始前に調整でき、値はブラウザ内に保存される -->
+  <dialog id="difficulty-settings" class="settings-dialog">
+    <div class="settings-dialog-content difficulty-settings-content">
+      <div class="settings-dialog-heading">
+        <h2>カスタム難易度</h2>
+        <button class="settings-close" type="button" aria-label="閉じる">×</button>
+      </div>
+      <label for="difficulty-rank-up">ランク上昇に必要な撃破率 <output id="difficulty-rank-up-value">60%</output></label>
+      <input id="difficulty-rank-up" type="range" min="0.45" max="1" step="0.05" value="0.6">
+
+      <label for="difficulty-enemy-speed">敵の移動速度上昇率 / ランク <output id="difficulty-enemy-speed-value">1%</output></label>
+      <input id="difficulty-enemy-speed" type="range" min="0" max="0.1" step="0.001" value="0.01">
+
+      <label for="difficulty-spawn-interval-min">敵の出現間隔下限（最短） <output id="difficulty-spawn-interval-min-value">500 ms</output></label>
+      <input id="difficulty-spawn-interval-min" type="range" min="100" max="1500" step="50" value="500">
+
+      <label for="difficulty-spawn-interval-decrease">出現間隔の減少率 / ランク <output id="difficulty-spawn-interval-decrease-value">10%</output></label>
+      <input id="difficulty-spawn-interval-decrease" type="range" min="0" max="0.3" step="0.01" value="0.1">
+
+      <label for="difficulty-blast-min">最小爆破面積 <output id="difficulty-blast-min-value">1/36</output></label>
+      <input id="difficulty-blast-min" class="blast-area-range" type="range" min="8" max="80" step="1" value="36">
+
+      <label for="difficulty-blast-max">最大爆破面積 <output id="difficulty-blast-max-value">1/12</output></label>
+      <input id="difficulty-blast-max" class="blast-area-range" type="range" min="4" max="40" step="1" value="12">
+
+      <button id="difficulty-reset" type="button">デフォルト設定に戻す</button>
+      <p>ランク下降条件は撃破率40%以下です。設定はこのブラウザに保存されます。</p>
+    </div>
+  </dialog>
+
   <!-- 画面下のキーインジケーター（game.js で動的生成） -->
   <div id="keymap"></div>
 
@@ -65,6 +120,7 @@
   <div id="gameover">
     <h1>GAME OVER</h1>
     <div class="reason" id="gameover-reason"></div>
+    <div id="best-aspect" class="best-aspect"></div>
     <table id="result-table">
       <thead>
         <tr><th></th><th>今回</th><th>自己ベスト</th></tr>

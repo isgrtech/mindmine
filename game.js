@@ -10,10 +10,18 @@
 const VERSION         = '3.0.0'; // 1桁目: main、2桁目: develop...、とブランチの階層でバージョンを分ける。
 const WAVE_INTERVAL   = 20000;   // Wave が上がるまでの ms
 const BASE_SPAWN_MS   = 2800;    // Wave1 の敵出現間隔 (ms)
+const DEFAULT_DIFFICULTY = {
+  rankUpThreshold: 0.6,
+  enemySpeedPerRank: 0.01,
+  spawnIntervalMin: 500,
+  spawnIntervalDecreasePerRank: 0.1,
+  minBlastAreaDivisor: 36,
+  maxBlastAreaDivisor: 12,
+};
+const DIFFICULTY_STORAGE_KEY = 'mindmine.customDifficulty';
+const difficulty = { ...DEFAULT_DIFFICULTY };
 const MINE_READY_MS   = 3000;    // 地雷設置からこの時間後に起爆可能になる (ms)
 const CHARGE_FULL_MS  = 2000;    // キーをこの時間押し続けると最大チャージ（超過で不発弾）(ms)
-const BLAST_MIN       = 40;      // 最小爆破半径: タップ即離しのとき (px)
-// 実際の blastMax はゲーム開始時に initState() で算出する（下記 blastMax 変数）
 const ENEMY_R_MIN     = 14;      // 敵の最小半径 (px)
 const ENEMY_R_MAX     = 26;      // 敵の最大半径 (px)
 // 進化間隔: 大きい敵ほど速く進化（20秒〜30秒）
@@ -24,11 +32,13 @@ const MAX_STAGE       = 5;       // 最終段階インデックス (0〜5 の 6 
 const FINAL_HORROR_MS = 5000;    // 最終段階演出の継続 ms
 const TRACK_KEYS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-^\\@[;:],./'.split('');
 
-/* プレイ開始時のウィンドウサイズを固定して使う
-   （プレイ中のリサイズは無視。ゲーム開始時に initState() で設定される） */
+/* プレイ開始時にアスペクト比を維持して表示領域へフィットする */
 let gameW = window.innerWidth;
 let gameH = window.innerHeight;
-let blastMax = Math.min(gameW, gameH) / 4;  // 最大爆破サイズ
+let fieldOffsetX = 0;
+let fieldOffsetY = 0;
+let blastMin = 0;
+let blastMax = 0;
 
 /* 各進化段階のビジュアル設定 */
 const STAGE_STYLE = [
@@ -58,6 +68,130 @@ const app = new PIXI.Application({
 });
 document.body.appendChild(app.view); // <canvas> を body 先頭に挿入
 document.getElementById('version').textContent = `v${VERSION}`;
+const ENEMY_TEXTURES = [
+  'assets/virus_blue.png',
+  'assets/virus_green.png',
+  'assets/virus_yellow.png',
+  'assets/virus_orange.png',
+  'assets/virus_red.png',
+  'assets/virus_black.png',
+].map(path => PIXI.Texture.from(path));
+const fieldAspectSelect = document.getElementById('field-aspect');
+const fieldSettings = document.getElementById('field-settings');
+const difficultySettings = document.getElementById('difficulty-settings');
+const difficultyInputs = {
+  rankUpThreshold: document.getElementById('difficulty-rank-up'),
+  enemySpeedPerRank: document.getElementById('difficulty-enemy-speed'),
+  spawnIntervalMin: document.getElementById('difficulty-spawn-interval-min'),
+  spawnIntervalDecreasePerRank: document.getElementById('difficulty-spawn-interval-decrease'),
+  minBlastAreaDivisor: document.getElementById('difficulty-blast-min'),
+  maxBlastAreaDivisor: document.getElementById('difficulty-blast-max'),
+};
+function formatDifficultyValue(key, value) {
+  if (key === 'minBlastAreaDivisor' || key === 'maxBlastAreaDivisor') return `1/${value}`;
+  if (key === 'enemySpeedPerRank') return `${(value * 100).toFixed(1)}%`;
+  if (key.includes('Threshold') || key.includes('PerRank')) return `${Math.round(value * 100)}%`;
+  return `${value} ms`;
+}
+function setDifficultyInputValue(key) {
+  const input = difficultyInputs[key];
+  if (!input) return;
+  const isBlastArea = key === 'minBlastAreaDivisor' || key === 'maxBlastAreaDivisor';
+  input.value = String(isBlastArea ? Number(input.min) + Number(input.max) - difficulty[key] : difficulty[key]);
+}
+function loadDifficultySettings() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(DIFFICULTY_STORAGE_KEY) || '{}');
+    for (const [key, input] of Object.entries(difficultyInputs)) {
+      const value = Number(saved[key]);
+      if (input && Number.isFinite(value)) {
+        const min = Number(input.min), max = Number(input.max);
+        difficulty[key] = Math.min(max, Math.max(min, value));
+      }
+    }
+  } catch (_) { /* 保存データが壊れていても既定値で起動する */ }
+  if (difficulty.minBlastAreaDivisor < difficulty.maxBlastAreaDivisor) {
+    difficulty.minBlastAreaDivisor = difficulty.maxBlastAreaDivisor;
+  }
+  for (const [key, input] of Object.entries(difficultyInputs)) {
+    if (input) setDifficultyInputValue(key);
+  }
+}
+function saveDifficultySettings() {
+  localStorage.setItem(DIFFICULTY_STORAGE_KEY, JSON.stringify(difficulty));
+}
+loadDifficultySettings();
+for (const [key, input] of Object.entries(difficultyInputs)) {
+  if (!input) continue;
+  const output = document.getElementById(`${input.id}-value`);
+  if (output) output.textContent = formatDifficultyValue(key, difficulty[key]);
+  input.addEventListener('input', () => {
+    const isBlastArea = key === 'minBlastAreaDivisor' || key === 'maxBlastAreaDivisor';
+    difficulty[key] = isBlastArea ? Number(input.min) + Number(input.max) - Number(input.value) : Number(input.value);
+    const coupledKey = key === 'minBlastAreaDivisor' ? 'maxBlastAreaDivisor'
+      : key === 'maxBlastAreaDivisor' ? 'minBlastAreaDivisor' : null;
+    if (coupledKey && difficulty.minBlastAreaDivisor < difficulty.maxBlastAreaDivisor) {
+      difficulty[coupledKey] = difficulty[key];
+      setDifficultyInputValue(coupledKey);
+      const coupledOutput = document.getElementById(`${difficultyInputs[coupledKey].id}-value`);
+      if (coupledOutput) coupledOutput.textContent = formatDifficultyValue(coupledKey, difficulty[coupledKey]);
+    }
+    const output = document.getElementById(`${input.id}-value`);
+    if (output) output.textContent = formatDifficultyValue(key, difficulty[key]);
+    saveDifficultySettings();
+    if ((key === 'minBlastAreaDivisor' || key === 'maxBlastAreaDivisor') && !gameRunning && !countdownPhase) {
+      fitGameFieldToViewport();
+      drawBackground();
+    }
+  });
+}
+document.getElementById('difficulty-reset').addEventListener('click', () => {
+  Object.assign(difficulty, DEFAULT_DIFFICULTY);
+  for (const [key, input] of Object.entries(difficultyInputs)) {
+    if (input) setDifficultyInputValue(key);
+    const output = input && document.getElementById(`${input.id}-value`);
+    if (output) output.textContent = formatDifficultyValue(key, difficulty[key]);
+  }
+  saveDifficultySettings();
+});
+const savedAspect = localStorage.getItem('mindmine.fieldAspect');
+if (fieldAspectSelect) {
+  if ([...fieldAspectSelect.options].some(option => option.value === savedAspect)) {
+    fieldAspectSelect.value = savedAspect;
+  }
+  fieldAspectSelect.addEventListener('change', () => {
+    localStorage.setItem('mindmine.fieldAspect', fieldAspectSelect.value);
+    if (!gameRunning && !countdownPhase) {
+      fitGameFieldToViewport();
+      drawBackground();
+    }
+  });
+}
+
+function setFieldSettingsLocked(locked) {
+  if (fieldAspectSelect) fieldAspectSelect.disabled = locked;
+  document.querySelectorAll('.settings-launcher').forEach(button => { button.disabled = locked; });
+  if (difficultySettings) {
+    difficultySettings.querySelectorAll('input, button').forEach(control => { control.disabled = locked; });
+  }
+  if (locked) {
+    if (fieldSettings.open) fieldSettings.close();
+    if (difficultySettings.open) difficultySettings.close();
+  }
+}
+
+document.getElementById('field-settings-open').addEventListener('click', () => {
+  if (!fieldSettings.open) fieldSettings.showModal();
+});
+document.getElementById('difficulty-settings-open').addEventListener('click', () => {
+  if (!difficultySettings.open) difficultySettings.showModal();
+});
+document.querySelectorAll('.settings-dialog').forEach(dialog => {
+  dialog.querySelector('.settings-close').addEventListener('click', () => dialog.close());
+  dialog.addEventListener('click', event => {
+    if (event.target === dialog) dialog.close();
+  });
+});
 
 /* ----------------------------------------------------------
    シーングラフのレイヤー構成
@@ -75,6 +209,9 @@ document.getElementById('version').textContent = `v${VERSION}`;
    ---------------------------------------------------------- */
 const worldContainer = new PIXI.Container();
 app.stage.addChild(worldContainer);
+const fieldMask = new PIXI.Graphics();
+app.stage.addChild(fieldMask);
+worldContainer.mask = fieldMask;
 
 const bgGfx          = new PIXI.Graphics();
 const explosionLayer = new PIXI.Container();
@@ -87,15 +224,45 @@ const chargeGfx    = new PIXI.Graphics(); // チャージ中の爆発範囲プ�
 const crosshairGfx = new PIXI.Graphics(); // マウスカーソル照準
 const floatLayer   = new PIXI.Container(); // 浮き上がりスコアテキスト
 app.stage.addChild(chargeGfx, crosshairGfx, floatLayer);
+floatLayer.mask = fieldMask;
 
 // 爆発パーティクル用の共有 Graphics（毎フレーム clear して再描画）
 const particleGfx = new PIXI.Graphics();
 explosionLayer.addChild(particleGfx);
 
+function fitGameFieldToViewport() {
+  const aspect = Number(fieldAspectSelect && fieldAspectSelect.value) || (16 / 9);
+  const viewW = window.innerWidth;
+  const viewH = window.innerHeight;
+  if (viewW / viewH > aspect) {
+    gameH = viewH;
+    gameW = gameH * aspect;
+  } else {
+    gameW = viewW;
+    gameH = gameW / aspect;
+  }
+  fieldOffsetX = (viewW - gameW) / 2;
+  fieldOffsetY = (viewH - gameH) / 2;
+  fieldMask.clear();
+  fieldMask.beginFill(0xffffff);
+  fieldMask.drawRect(fieldOffsetX, fieldOffsetY, gameW, gameH);
+  fieldMask.endFill();
+  mouseX = pointerClientX - fieldOffsetX;
+  mouseY = pointerClientY - fieldOffsetY;
+  mouseInsideField = mouseX >= 0 && mouseY >= 0 && mouseX <= gameW && mouseY <= gameH;
+  const fieldArea = gameW * gameH;
+  blastMin = Math.sqrt(fieldArea / (Math.PI * difficulty.minBlastAreaDivisor));
+  blastMax = Math.sqrt(fieldArea / (Math.PI * difficulty.maxBlastAreaDivisor));
+  worldContainer.x = fieldOffsetX;
+  worldContainer.y = fieldOffsetY;
+}
+
 /* ----------------------------------------------------------
    サウンドエフェクト（Web Audio API で合成、外部ファイル不要）
    ---------------------------------------------------------- */
 const _ac = new (window.AudioContext || window.webkitAudioContext)();
+const explosionSample = new Audio('assets/Explosion04-1(Short).mp3');
+explosionSample.preload = 'auto';
 
 /**
  * 汎用トーン生成ユーティリティ
@@ -168,18 +335,20 @@ function seReady() {
 
 /** 爆発: 爆破半径に応じた迫力 */
 function seExplode(br) {
-  const scale = Math.min(br / 220, 1);        // 0〜1
-  const vol   = 0.15 + scale * 0.35;
-  const dur   = 0.25 + scale * 0.4;
-  _noise(dur, vol * 1.2);
-  _tone('sawtooth', 80 + scale * 60, 20, dur, vol * 0.8);
-  _tone('sine', 200, 40, dur * 0.6, vol * 0.4);
+  const scale = Math.min(br / 220, 1);
+  const sound = explosionSample.cloneNode();
+  sound.volume = 0.32 + scale * 0.38;
+  sound.play().catch(() => {});
+  _tone('sine', 150, 35, 0.24 + scale * 0.12, 0.16 + scale * 0.08);
 }
 
 /** 不発弾誘爆: 爆発より低くこもった音 */
 function seDudExplode(br) {
   const scale = Math.min(br / 220, 1);
-  _noise(0.25, 0.1 + scale * 0.1);
+  const sound = explosionSample.cloneNode();
+  sound.volume = 0.2 + scale * 0.2;
+  sound.playbackRate = 0.78;
+  sound.play().catch(() => {});
   _tone('triangle', 120, 30, 0.3, 0.15);
 }
 
@@ -261,6 +430,10 @@ let spawnTimer = 0;
 
 let mouseX = 0;
 let mouseY = 0;
+let mouseInsideField = false;
+let hasPointerPosition = false;
+let pointerClientX = 0;
+let pointerClientY = 0;
 
 const holdStart = {};
 
@@ -280,7 +453,6 @@ function getRankLabel(i) { return String(i + 1); }
 function getRankMult(i)  { return i + 1; }
 const RANK_INTERVAL_MS    = 30000; // ランク評価間隔 (ms)
 const RANK_REFERENCE_MS   = 20000; // 基準出現数を算出する参照時間 (ms)
-const RANK_UP_THRESHOLD   = 0.6;   // 撃破率がこの割合以上でランクアップ
 const RANK_DOWN_THRESHOLD = 0.4;   // 撃破率がこの割合以下でランクダウン
 
 let rankIndex          = 0;   // 現在のランクインデックス（表示は +1）
@@ -419,80 +591,81 @@ function drawDottedCircle(gfx, x, y, r, color, alpha, dotCount) {
    敵の目を描画する（gfx はその敵専用の PIXI.Graphics）
    ---------------------------------------------------------- */
 function drawEnemyEyes(gfx, stage, drawR, now) {
-  const st   = STAGE_STYLE[stage];
-  const eyeR = drawR * (0.2 + stage * 0.04);
-  const eyeY = -drawR * 0.15;
-  const eyeX = drawR * 0.3;
-  // 白目なし: 眼球全体を黒い瞳孔で覆う。段階が上がるほど大きくなる。
-  const pupilR = eyeR * (0.75 + stage * 0.05); // stage0=75%〜stage5=100%
+  const eyeR = drawR * 0.33, eyeY = -drawR * 0.12, eyeX = drawR * 0.37;
+  const pulse = 0.78 + 0.22 * Math.sin(now * 8);
+  const lidColor = STAGE_STYLE[stage].fill;
+  const glow = stage === 4 ? 0xff3026 : stage === 5 ? 0xc71932 :
+    stage === 0 ? 0x66cddd : stage === 1 ? 0x54b875 : stage === 2 ? 0xd8a83c : 0xd76b32;
+  const pupil = [0x020a12, 0x061109, 0x120b03, 0x140702, 0x160304, 0x100106][stage];
 
   for (let side = -1; side <= 1; side += 2) {
-    const ex = side * eyeX;
+    const wild = stage === 5 && side === 1;
+    const x = side * eyeX;
+    const y = eyeY + (wild ? Math.sin(now * 11) * drawR * 0.025 : 0);
+    const r = eyeR * (wild ? 0.78 : 1);
 
-    // 瞳孔のみ（白目なし）
-    if (stage >= 1) drawGlow(gfx, ex, eyeY, pupilR * 1.05, st.glow, 0.3, 3);
-    gfx.beginFill(0x000000, 1);
-    gfx.drawCircle(ex, eyeY, Math.min(pupilR, eyeR));
+    // Large dark socket and iris: black occupies most of the eye.
+    gfx.beginFill(0x02060a, 0.96);
+    gfx.drawEllipse(x, y, r * 1.1, r * 1.03);
+    gfx.endFill();
+    drawGlow(gfx, x, y, r * 0.72, glow, stage === 4 ? 0.18 * pulse : stage === 5 ? 0.1 : 0.055, 4);
+    gfx.beginFill(glow, stage === 4 ? 0.72 * pulse : stage === 5 ? 0.58 : 0.55);
+    gfx.drawCircle(x, y, r * 0.84);
+    gfx.endFill();
+    gfx.beginFill(pupil, 1);
+    const gazeX = stage === 5 ? Math.sin(now * 13 + side * 2) * r * 0.2 : r * 0.04;
+    const gazeY = stage === 5 ? Math.cos(now * 9 + side) * r * 0.12 : 0;
+    gfx.drawCircle(x + gazeX, y + gazeY, r * 0.7);
+    gfx.endFill();
+    gfx.beginFill(0xffffff, 0.72);
+    gfx.drawCircle(x - r * 0.25, y - r * 0.3, r * 0.12);
     gfx.endFill();
 
-    // 怒り眉（段階 2 以上）
-    if (stage >= 2) {
-      const browSlope = (stage - 1) * 4;
-      const browY     = eyeY - eyeR - 3;
-      const browColor = stage >= 4 ? 0xff2200 : 0x220000;
-      gfx.lineStyle(Math.max(1.5, drawR * 0.05), browColor, stage >= 4 ? 1 : 0.8);
-      gfx.moveTo(ex - eyeR, browY + side * browSlope);
-      gfx.lineTo(ex + eyeR, browY - side * browSlope);
+    // A faint upper lid gives green eyes a calm, slightly sleepy expression.
+    if (stage === 1) {
+      gfx.beginFill(lidColor, 1);
+      gfx.moveTo(x - r * 1.15, y - r * 1.2);
+      gfx.lineTo(x + r * 1.15, y - r * 1.2);
+      gfx.lineTo(x + r * 1.15, y - r * 0.72);
+      gfx.quadraticCurveTo(x, y - r * 0.58, x - r * 1.15, y - r * 0.72);
+      gfx.closePath();
+      gfx.endFill();
+    } else if (stage === 2) {
+      gfx.beginFill(lidColor, 1);
+      gfx.moveTo(x - r * 1.2, y - r * 1.2);
+      gfx.lineTo(x + r * 1.2, y - r * 1.2);
+      gfx.lineTo(x + r * 1.2, y - r * 0.05);
+      gfx.lineTo(x, y + r * 0.18);
+      gfx.lineTo(x - r * 1.2, y - r * 0.05);
+      gfx.closePath();
+      gfx.endFill();
+    } else if (stage === 3) {
+      gfx.beginFill(lidColor, 1);
+      gfx.moveTo(x - r * 1.2, y - r * 1.2);
+      gfx.lineTo(x + r * 1.2, y - r * 1.2);
+      gfx.lineTo(x + side * r * 1.15, y - r * 0.35);
+      gfx.lineTo(x - side * r * 1.15, y + r * 0.12);
+      gfx.closePath();
+      gfx.endFill();
+    } else if (stage === 4) {
+      gfx.beginFill(lidColor, 1);
+      gfx.moveTo(x - r * 1.2, y - r * 1.2);
+      gfx.lineTo(x + r * 1.2, y - r * 1.2);
+      const innerX = x - side * r * 1.18;
+      const outerX = x + side * r * 1.12;
+      gfx.lineTo(outerX, y - r * 0.38);
+      gfx.bezierCurveTo(outerX - side * r * 0.55, y - r * 0.2,
+        innerX + side * r * 0.45, y + r * 0.56, innerX, y + r * 0.58);
+      gfx.lineTo(innerX, y - r * 1.2);
+      gfx.closePath();
+      gfx.endFill();
+    } else if (stage === 5) {
+      gfx.lineStyle(Math.max(1.2, drawR * 0.035), 0x9d1025, 0.78);
+      gfx.moveTo(x - r * 0.9, y + r * 0.15);
+      gfx.lineTo(x - r * 1.22, y + r * 0.52);
+      gfx.lineTo(x - r * 0.62, y + r * 0.78);
       gfx.lineStyle(0);
     }
-
-    // 血走り（段階 5）
-    if (stage >= MAX_STAGE) {
-      gfx.lineStyle(0.8, 0xff0000, 0.7);
-      for (let v = 0; v < 3; v++) {
-        const va = (v / 3) * Math.PI * 2;
-        gfx.moveTo(ex + Math.cos(va) * eyeR * 0.5, eyeY + Math.sin(va) * eyeR * 0.5);
-        gfx.lineTo(ex + Math.cos(va) * eyeR * 0.95, eyeY + Math.sin(va) * eyeR * 0.95);
-      }
-      gfx.lineStyle(0);
-    }
-  }
-
-  // 口: 段階 0〜1 は笑顔、段階 2 は平坦、段階 3 以上は不機嫌
-  const mouthY  = drawR * 0.32;
-  const mouthW  = drawR * 0.38;
-  const lw      = Math.max(1.2, drawR * 0.045);
-  if (stage <= 1) {
-    // 笑顔: 下に開いた弧
-    const mouthColor = stage === 0 ? 0x003311 : 0x112200;
-    gfx.lineStyle(lw, mouthColor, 0.9);
-    gfx.arc(0, mouthY - mouthW * 0.4, mouthW * 0.6, Math.PI * 0.1, Math.PI * 0.9);
-    gfx.lineStyle(0);
-  } else if (stage === 2) {
-    // 平坦: 横一文字
-    gfx.lineStyle(lw, 0x221100, 0.7);
-    gfx.moveTo(-mouthW * 0.5, mouthY);
-    gfx.lineTo( mouthW * 0.5, mouthY);
-    gfx.lineStyle(0);
-  } else {
-    // 不機嫌: 上に開いた弧（への字口）
-    const mouthColor = stage >= 5 ? 0xff0000 : 0x550000;
-    gfx.lineStyle(lw, mouthColor, stage >= 4 ? 1 : 0.85);
-    gfx.arc(0, mouthY + mouthW * 0.35, mouthW * 0.5, Math.PI * 1.1, Math.PI * 1.9);
-    gfx.lineStyle(0);
-  }
-
-  // 「!」マーク（段階 5 — 脈動する赤い縦棒＋点）
-  if (stage >= MAX_STAGE) {
-    const pulse = 0.7 + 0.3 * Math.sin(now * 8);
-    const lw2   = drawR * 0.06;
-    gfx.lineStyle(lw2, 0xff0000, pulse);
-    gfx.moveTo(0, drawR * 0.55);
-    gfx.lineTo(0, drawR * 0.72);
-    gfx.lineStyle(0);
-    gfx.beginFill(0xff0000, pulse);
-    gfx.drawCircle(0, drawR * 0.8, lw2 * 0.8);
-    gfx.endFill();
   }
 }
 
@@ -500,30 +673,23 @@ function drawEnemyEyes(gfx, stage, drawR, now) {
    敵を再描画する（毎フレーム）
    ---------------------------------------------------------- */
 function redrawEnemy(e, now) {
-  const gfx   = e.gfx;
   const st    = STAGE_STYLE[e.stage];
   const drawR = e.r * st.rMul;
+  const sprite = e.sprite;
+  const gfx = e.effectGfx;
 
+  if (sprite.texture !== ENEMY_TEXTURES[e.stage]) sprite.texture = ENEMY_TEXTURES[e.stage];
+  sprite.width = drawR * 2;
+  sprite.height = drawR * 2;
+  e.gfx.x = e.x;
+  e.gfx.y = e.y;
   gfx.clear();
 
-  // グロー
-  drawGlow(gfx, 0, 0, drawR, st.glow, 0.15, 5);
-
-  // 外縁（stroke 色で少し大きく）
-  gfx.beginFill(st.stroke, 0.9);
-  gfx.drawCircle(0, 0, drawR);
-  gfx.endFill();
-
-  // 内側（fill 色）
-  gfx.beginFill(st.fill, 1);
-  gfx.drawCircle(0, 0, drawR * 0.82);
-  gfx.endFill();
-
-  // 最終段階の脈動ハイライト
+  // 最終段階の画像に脈動する赤いハイライトを重ねる。
   if (e.stage >= MAX_STAGE) {
     const pulse = 0.3 + 0.3 * Math.sin(now * 6 + e.pulseOffset);
     gfx.beginFill(0xff0000, pulse);
-    gfx.drawCircle(0, 0, drawR * 0.55);
+    gfx.drawCircle(0, 0, drawR * 0.82);
     gfx.endFill();
   }
 
@@ -536,11 +702,6 @@ function redrawEnemy(e, now) {
     gfx.drawCircle(0, 0, drawR + 3);
     gfx.lineStyle(0);
   }
-
-  drawEnemyEyes(gfx, e.stage, drawR, now);
-
-  gfx.x = e.x;
-  gfx.y = e.y;
 }
 
 /* ----------------------------------------------------------
@@ -607,8 +768,8 @@ function redrawMine(m, now) {
   const shakeMag = m.shakeTimer > 0 ? Math.min(m.shakeTimer * 40, 6) : 0;
   gfx.x = m.x + (Math.random() - 0.5) * shakeMag * 2;
   gfx.y = m.y + (Math.random() - 0.5) * shakeMag * 2;
-  m.timerText.x = m.x;
-  m.timerText.y = m.y - 20;
+  m.timerText.x = m.x + fieldOffsetX;
+  m.timerText.y = m.y + fieldOffsetY - 20;
 }
 
 /* ----------------------------------------------------------
@@ -616,6 +777,26 @@ function redrawMine(m, now) {
    ---------------------------------------------------------- */
 function drawBackground() {
   bgGfx.clear();
+
+  bgGfx.beginFill(0x06111a, 1);
+  bgGfx.drawRect(0, 0, gameW, gameH);
+  bgGfx.endFill();
+  bgGfx.beginFill(0x103344, 0.12);
+  bgGfx.drawCircle(gameW * 0.5, gameH * 0.48, Math.min(gameW, gameH) * 0.48);
+  bgGfx.endFill();
+  const radarR = Math.min(gameW, gameH) * 0.16;
+  bgGfx.lineStyle(1, 0x23536a, 0.17);
+  for (let i = 1; i <= 3; i++) bgGfx.drawCircle(gameW * 0.5, gameH * 0.5, radarR * i);
+
+  let seed = 731;
+  const random = () => { seed = (seed * 16807) % 2147483647; return (seed - 1) / 2147483646; };
+  for (let i = 0; i < 100; i++) {
+    const x = random() * gameW, y = random() * gameH;
+    const r = 0.6 + random() * 1.4;
+    bgGfx.beginFill(i % 5 === 0 ? 0x62c8d8 : 0x7899a8, 0.12 + random() * 0.28);
+    bgGfx.drawCircle(x, y, r);
+    bgGfx.endFill();
+  }
 
   // グリッド（gameW/gameH を使って固定サイズで描く）
   bgGfx.lineStyle(0.5, 0x112233, 0.35);
@@ -642,7 +823,8 @@ function drawBackground() {
    ---------------------------------------------------------- */
 function drawCrosshair() {
   crosshairGfx.clear();
-  const x = mouseX, y = mouseY, sz = 10;
+  if (!mouseInsideField) return;
+  const x = mouseX + fieldOffsetX, y = mouseY + fieldOffsetY, sz = 10;
   crosshairGfx.lineStyle(1, 0x00ffff, 0.7);
   crosshairGfx.moveTo(x - sz, y); crosshairGfx.lineTo(x + sz, y);
   crosshairGfx.moveTo(x, y - sz); crosshairGfx.lineTo(x, y + sz);
@@ -654,21 +836,23 @@ function drawCrosshair() {
    ---------------------------------------------------------- */
 function drawChargePreview(now) {
   chargeGfx.clear();
+  if (!mouseInsideField) return;
   for (const key of TRACK_KEYS) {
     if (!(key in holdStart)) continue;
     const held     = (now - holdStart[key]) * 1000;
     const isDudPrev= held > CHARGE_FULL_MS;
     const clamped  = Math.min(held, CHARGE_FULL_MS);
     const t  = clamped / CHARGE_FULL_MS;
-    const br = BLAST_MIN + t * (blastMax - BLAST_MIN);
+    const br = blastMin + t * (blastMax - blastMin);
     const color = isDudPrev ? 0x2244aa : lerpColor(0x0066cc, 0xffaa00, t);
     const alpha = isDudPrev ? 0.2 : (0.25 + 0.2 * t);
 
-    drawDottedCircle(chargeGfx, mouseX, mouseY, br, color, alpha, 60);
+    const x = mouseX + fieldOffsetX, y = mouseY + fieldOffsetY;
+    drawDottedCircle(chargeGfx, x, y, br, color, alpha, 60);
 
     // チャージアーク（マウス周辺の弧でチャージ量を表示）
     chargeGfx.lineStyle(3, color, 0.7);
-    chargeGfx.arc(mouseX, mouseY, 18, -Math.PI / 2, -Math.PI / 2 + t * Math.PI * 2);
+    chargeGfx.arc(x, y, 18, -Math.PI / 2, -Math.PI / 2 + t * Math.PI * 2);
     chargeGfx.lineStyle(0);
   }
 }
@@ -678,12 +862,24 @@ function drawChargePreview(now) {
    ---------------------------------------------------------- */
 function spawnExplosion(cx, cy, br, isDud) {
   const colors = isDud ? BLAST_COLORS.dud : BLAST_COLORS.normal;
+  const image = PIXI.Sprite.from('assets/explosion.png');
+  image.anchor.set(0.5);
+  image.tint = isDud ? 0x78baff : 0xffffff;
+  // PNG の炎や煙の質感を保つため、通常合成で重ねる。
+  image.blendMode = PIXI.BLEND_MODES.NORMAL;
+  explosionLayer.addChildAt(image, 0);
+  particles.push({
+    type: 'blastImage', sprite: image, x: cx, y: cy, maxSize: br * 2.4,
+    life: 0, maxLife: 0.42, rotationSpeed: (Math.random() - 0.5) * 0.5,
+  });
 
   // フラッシュ
   particles.push({ type: 'flash', x: cx, y: cy, maxR: br * 0.6, life: 0, maxLife: 0.18, color: isDud ? 0x88ccff : 0xffffff });
 
   // 衝撃波リング
   particles.push({ type: 'ring', x: cx, y: cy, maxR: br, life: 0, maxLife: 0.55, color: colors[0] });
+  particles.push({ type: 'ring', x: cx, y: cy, maxR: br * 0.72, life: 0.06, maxLife: 0.42, color: colors[1] });
+  particles.push({ type: 'core', x: cx, y: cy, maxR: Math.max(16, br * 0.22), life: 0, maxLife: 0.24, color: isDud ? 0x88ddff : 0xffee99 });
 
   // スパーク
   const sparkCount = Math.floor(8 + br / 10);
@@ -724,13 +920,34 @@ function updateParticles(dt) {
   for (const p of particles) {
     p.life += dt;
     const t    = p.life / p.maxLife;
-    if (t >= 1) continue;
+    if (t >= 1) {
+      if (p.sprite) {
+        explosionLayer.removeChild(p.sprite);
+        p.sprite.destroy({ texture: false, baseTexture: false });
+      }
+      continue;
+    }
     alive.push(p);
     const tRev = 1 - t;
 
-    if (p.type === 'flash') {
+    if (p.type === 'blastImage') {
+      const size = p.maxSize * (0.72 + easeOutCubic(t) * 0.48);
+      p.sprite.x = p.x;
+      p.sprite.y = p.y;
+      p.sprite.width = size;
+      p.sprite.height = size;
+      p.sprite.alpha = tRev * 0.82;
+      p.sprite.rotation += p.rotationSpeed * dt;
+    }
+    else if (p.type === 'flash') {
       g.beginFill(p.color, tRev * 0.8);
       g.drawCircle(p.x, p.y, p.maxR * (1 - t));
+      g.endFill();
+    }
+    else if (p.type === 'core') {
+      const pulse = Math.sin(Math.min(1, t) * Math.PI);
+      g.beginFill(p.color, tRev * 0.75);
+      g.drawCircle(p.x, p.y, p.maxR * (0.45 + pulse * 0.55));
       g.endFill();
     }
     else if (p.type === 'ring') {
@@ -771,7 +988,7 @@ function spawnFloatText(x, y, text, color) {
   const style = new PIXI.TextStyle({ fontSize: 20, fill: color, fontWeight: 'bold', fontFamily: 'Courier New' });
   const t = new PIXI.Text(text, style);
   t.anchor.set(0.5, 0.5);
-  t.x = x; t.y = y;
+  t.x = x + fieldOffsetX; t.y = y + fieldOffsetY;
   t._life = 0;
   t._maxLife = 1.2;
   floatLayer.addChild(t);
@@ -800,13 +1017,13 @@ function triggerShake(intensity) {
 
 function updateShake(dt) {
   if (shakeIntensity < 0.5) {
-    worldContainer.x = 0;
-    worldContainer.y = 0;
+    worldContainer.x = fieldOffsetX;
+    worldContainer.y = fieldOffsetY;
     shakeIntensity   = 0;
     return;
   }
-  worldContainer.x = (Math.random() - 0.5) * shakeIntensity * 2;
-  worldContainer.y = (Math.random() - 0.5) * shakeIntensity * 2;
+  worldContainer.x = fieldOffsetX + (Math.random() - 0.5) * shakeIntensity * 2;
+  worldContainer.y = fieldOffsetY + (Math.random() - 0.5) * shakeIntensity * 2;
   shakeIntensity  *= Math.pow(0.85, dt * 60);
 }
 
@@ -833,7 +1050,14 @@ function spawnEnemy() {
   const evoRank = Math.min(rankIndex, 5);
   const evoMs   = Math.max(10000, baseEvo / (1 + evoRank * 0.1));
 
-  const e = { x, y, r, evoMs, stage: 0, evoTimer: 0, moveType, pulseOffset: Math.random() * Math.PI * 2, gfx: new PIXI.Graphics() };
+  const speedMult = 1 + rankIndex * difficulty.enemySpeedPerRank;
+  const visual = new PIXI.Container();
+  const sprite = new PIXI.Sprite(ENEMY_TEXTURES[0]);
+  sprite.anchor.set(0.5);
+  const effectGfx = new PIXI.Graphics();
+  visual.addChild(sprite, effectGfx);
+  const e = { x, y, r, evoMs, stage: 0, evoTimer: 0, moveType, speedMult,
+    pulseOffset: Math.random() * Math.PI * 2, gfx: visual, sprite, effectGfx };
   MOVE_TYPES[moveType].init(e);
   enemyLayer.addChild(e.gfx);
   enemies.push(e);
@@ -891,7 +1115,7 @@ function detonateMine(key) {
       killed.push(e);
       enemies.splice(i, 1);
       enemyLayer.removeChild(e.gfx);
-      e.gfx.destroy();
+      e.gfx.destroy({ children: true });
     }
   }
 
@@ -916,7 +1140,7 @@ function detonateMine(key) {
     basePts += comboCount;
 
     // 爆破範囲乗算: 範囲大=1倍、範囲小=2倍
-    const radiusMult = 1 + (blastMax - br) / Math.max(blastMax - BLAST_MIN, 1);
+    const radiusMult = 1 + (blastMax - br) / Math.max(blastMax - blastMin, 1);
     let pts = Math.round(basePts * radiusMult);
 
     // ランク倍率
@@ -1001,7 +1225,7 @@ app.ticker.add((delta) => {
     const W = gameW, H = gameH;
     enemies.forEach(e => {
       e.stage = MAX_STAGE;
-      MOVE_TYPES[e.moveType].update(e, dt * 2.5, now);
+      MOVE_TYPES[e.moveType].update(e, dt * 2.5 * e.speedMult, now);
       if (e.x < e.r)     bounceEnemy(e, 'x',  e.r,     1);
       if (e.x > W - e.r) bounceEnemy(e, 'x',  W - e.r, -1);
       if (e.y < e.r)     bounceEnemy(e, 'y',  e.r,     1);
@@ -1032,7 +1256,7 @@ app.ticker.add((delta) => {
     // 現在の出現間隔で RANK_REFERENCE_MS(20s) に出現する敵数を基準とする
     const expectedIn20s = RANK_REFERENCE_MS / currentSpawnInterval;
     const killRate = k / expectedIn20s;
-    if      (killRate >= RANK_UP_THRESHOLD)  rankIndex = rankIndex + 1;
+    if      (killRate >= difficulty.rankUpThreshold) rankIndex = rankIndex + 1;
     else if (killRate <= RANK_DOWN_THRESHOLD) rankIndex = Math.max(rankIndex - 1, 0);
 
     if (rankIndex !== prevRank) {
@@ -1064,8 +1288,8 @@ app.ticker.add((delta) => {
   // 敵出現（ランクが上がるほど間隔が短くなる: rank毎に10%短縮、最短500ms）
   spawnTimer += dt * 1000;
   const baseInterval   = Math.max(800, BASE_SPAWN_MS - (wave - 1) * 200);
-  const rankSpeedMult  = 1 + rankIndex * 0.1;          // rank0=×1.0, rank7=×1.7
-  currentSpawnInterval = Math.max(500, baseInterval / rankSpeedMult);
+  const rankSpeedMult  = 1 + rankIndex * difficulty.spawnIntervalDecreasePerRank;
+  currentSpawnInterval = Math.max(difficulty.spawnIntervalMin, baseInterval / rankSpeedMult);
   if (spawnTimer >= currentSpawnInterval) {
     spawnTimer -= currentSpawnInterval;
     spawnEnemy();
@@ -1082,7 +1306,7 @@ app.ticker.add((delta) => {
         if (e.stage >= MAX_STAGE) finalReached = true;
       }
     }
-    MOVE_TYPES[e.moveType].update(e, dt, now);
+    MOVE_TYPES[e.moveType].update(e, dt * e.speedMult, now);
     if (e.x < e.r)     bounceEnemy(e, 'x',  e.r,     1);
     if (e.x > W - e.r) bounceEnemy(e, 'x',  W - e.r, -1);
     if (e.y < e.r)     bounceEnemy(e, 'y',  e.r,     1);
@@ -1150,11 +1374,11 @@ function updateUI() {
   if (fill) {
     fill.style.width = `${Math.min(pct, 100)}%`;
     // 色: 80%以上=シアン(↑), 40%以下=赤(↓), それ以外=緑(→)
-    fill.style.background = rate >= RANK_UP_THRESHOLD ? '#0ff' : (rate <= RANK_DOWN_THRESHOLD ? '#f44' : '#0f0');
+    fill.style.background = rate >= difficulty.rankUpThreshold ? '#0ff' : (rate <= RANK_DOWN_THRESHOLD ? '#f44' : '#0f0');
   }
   if (hint) {
-    hint.textContent = rate >= RANK_UP_THRESHOLD ? '▲UP' : (rate <= RANK_DOWN_THRESHOLD ? '▼DN' : '→');
-    hint.style.color = rate >= RANK_UP_THRESHOLD ? '#0ff' : (rate <= RANK_DOWN_THRESHOLD ? '#f44' : '#888');
+    hint.textContent = rate >= difficulty.rankUpThreshold ? '▲UP' : (rate <= RANK_DOWN_THRESHOLD ? '▼DN' : '→');
+    hint.style.color = rate >= difficulty.rankUpThreshold ? '#0ff' : (rate <= RANK_DOWN_THRESHOLD ? '#f44' : '#888');
   }
 }
 
@@ -1188,20 +1412,25 @@ function hideCountdown() {
 
 function endGame(reason) {
   gameRunning = false;
+  countdownPhase = false;
+  _waitingForInteraction = false;
+  setFieldSettingsLocked(false);
   seGameOver();
   const kpm = playTimeSec > 0 ? (totalKills / playTimeSec * 60).toFixed(1) : '0.0';
 
   // localStorage から自己ベストを読み込み、更新する
+  const aspectKey = Number(fieldAspectSelect.value).toFixed(6).replace('.', '_');
+  const bestKey = metric => `mm_best_${aspectKey}_${metric}`;
   const best = {
-    score : parseInt(localStorage.getItem('mm_best_score') || '0', 10),
-    combo : parseInt(localStorage.getItem('mm_best_combo') || '0', 10),
-    rank  : parseInt(localStorage.getItem('mm_best_rank')  || '0', 10),
-    kpm   : parseFloat(localStorage.getItem('mm_best_kpm') || '0'),
+    score : parseInt(localStorage.getItem(bestKey('score')) || '0', 10),
+    combo : parseInt(localStorage.getItem(bestKey('combo')) || '0', 10),
+    rank  : parseInt(localStorage.getItem(bestKey('rank'))  || '0', 10),
+    kpm   : parseFloat(localStorage.getItem(bestKey('kpm')) || '0'),
   };
-  if (score        > best.score) { best.score = score;           localStorage.setItem('mm_best_score', score); }
-  if (maxCombo     > best.combo) { best.combo = maxCombo;        localStorage.setItem('mm_best_combo', maxCombo); }
-  if (rankIndex    > best.rank)  { best.rank  = rankIndex;       localStorage.setItem('mm_best_rank',  rankIndex); }
-  if (parseFloat(kpm) > best.kpm){ best.kpm   = parseFloat(kpm); localStorage.setItem('mm_best_kpm',  kpm); }
+  if (score        > best.score) { best.score = score;           localStorage.setItem(bestKey('score'), score); }
+  if (maxCombo     > best.combo) { best.combo = maxCombo;        localStorage.setItem(bestKey('combo'), maxCombo); }
+  if (rankIndex    > best.rank)  { best.rank  = rankIndex;       localStorage.setItem(bestKey('rank'),  rankIndex); }
+  if (parseFloat(kpm) > best.kpm){ best.kpm   = parseFloat(kpm); localStorage.setItem(bestKey('kpm'),  kpm); }
 
   document.getElementById('gameover-reason').textContent = reason || '';
   document.getElementById('final-score').textContent     = score;
@@ -1214,6 +1443,7 @@ function endGame(reason) {
   document.getElementById('best-combo').textContent = best.combo;
   document.getElementById('best-rank').textContent  = getRankLabel(best.rank);
   document.getElementById('best-kps').textContent   = best.kpm.toFixed(1);
+  document.getElementById('best-aspect').textContent = `アスペクト比 ${fieldAspectSelect.selectedOptions[0].textContent} の自己ベスト`;
 
   document.getElementById('gameover').style.display = 'flex';
 }
@@ -1231,11 +1461,17 @@ function initState() {
   mines = {};
 
   // 敵クリア
-  for (const e of enemies) { enemyLayer.removeChild(e.gfx); e.gfx.destroy(); }
+  for (const e of enemies) { enemyLayer.removeChild(e.gfx); e.gfx.destroy({ children: true }); }
   enemies = [];
 
   // パーティクルクリア
   particleGfx.clear();
+  for (const p of particles) {
+    if (p.sprite) {
+      explosionLayer.removeChild(p.sprite);
+      p.sprite.destroy({ texture: false, baseTexture: false });
+    }
+  }
   particles = [];
 
   // フロートテキストクリア
@@ -1265,10 +1501,8 @@ function initState() {
     if (dot) dot.className = 'evo-dot';
   }
 
-  // プレイ開始時のウィンドウサイズを固定（プレイ中のリサイズは無視）
-  gameW    = window.innerWidth;
-  gameH    = window.innerHeight;
-  blastMax = Math.min(gameW, gameH) / 4;
+  // 設定した比率のフィールドを、開始時の表示可能領域へフィット。
+  fitGameFieldToViewport();
 
   updateUI();
   document.getElementById('wave').textContent = '1';
@@ -1301,6 +1535,7 @@ function _beginCountdown() {
 
 function startGame() {
   document.getElementById('gameover').style.display = 'none';
+  setFieldSettingsLocked(false);
   initState();
 
   // カウントダウン前に「キーを押して開始」画面を出し、
@@ -1319,9 +1554,11 @@ window.restartGame = startGame;
    キーボードイベント
    ---------------------------------------------------------- */
 window.addEventListener('keydown', e => {
+  if (e.target.closest && e.target.closest('.settings-dialog')) return;
   // 「PRESS ANY KEY」待ち状態: 最初のキー入力で AudioContext をアンロックしカウントダウン開始
   if (_waitingForInteraction) {
     _waitingForInteraction = false;
+    setFieldSettingsLocked(true);
     _beginCountdown();
     return;
   }
@@ -1352,6 +1589,13 @@ window.addEventListener('keydown', e => {
 
 window.addEventListener('keyup', e => {
   if (!gameRunning) return;
+  if (e.target.closest && e.target.closest('.settings-dialog')) {
+    const focusedKey = e.key.toUpperCase();
+    delete holdStart[focusedKey];
+    const focusedKeyEl = document.getElementById('ki-' + focusedKey);
+    if (focusedKeyEl) focusedKeyEl.className = 'ki';
+    return;
+  }
   const key = e.key.toUpperCase();
   if (!TRACK_KEYS.includes(key) || !(key in holdStart)) return;
 
@@ -1359,10 +1603,13 @@ window.addEventListener('keyup', e => {
   const held    = (now - holdStart[key]) * 1000;
   const isDud   = held > CHARGE_FULL_MS;
   const clamped = Math.min(held, CHARGE_FULL_MS);
-  const br      = BLAST_MIN + (clamped / CHARGE_FULL_MS) * (blastMax - BLAST_MIN);
+  const br      = blastMin + (clamped / CHARGE_FULL_MS) * (blastMax - blastMin);
 
   delete holdStart[key];
   if (mines[key]) return;
+  const keyEl = document.getElementById('ki-' + key);
+  if (keyEl) keyEl.className = 'ki';
+  if (!mouseInsideField) return;
 
   placeMine(key, mouseX, mouseY, br, isDud);
 });
@@ -1370,7 +1617,14 @@ window.addEventListener('keyup', e => {
 /* ----------------------------------------------------------
    マウス座標追跡
    ---------------------------------------------------------- */
-window.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+window.addEventListener('mousemove', e => {
+  hasPointerPosition = true;
+  pointerClientX = e.clientX;
+  pointerClientY = e.clientY;
+  mouseX = pointerClientX - fieldOffsetX;
+  mouseY = pointerClientY - fieldOffsetY;
+  mouseInsideField = hasPointerPosition && mouseX >= 0 && mouseY >= 0 && mouseX <= gameW && mouseY <= gameH;
+});
 
 /* ----------------------------------------------------------
    キーマップ UI の生成
